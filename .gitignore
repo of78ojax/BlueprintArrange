@@ -1,0 +1,22 @@
+# Build artifacts
+Binaries/
+Intermediate/
+
+# Visual Studio / IDE
+.vs/
+.vscode/
+.idea/
+
+# Unreal Engine generated
+Saved/
+DerivedDataCache/
+*.pdb
+*.obj
+*.lib
+*.exp
+*.dll
+*.exe
+
+# OS files
+Thumbs.db
+.DS_Store
