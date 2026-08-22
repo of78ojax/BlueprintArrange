@@ -4,13 +4,17 @@ One-click Sugiyama-style auto-layout for Unreal Engine Blueprint graphs.
 
 Adds an **Arrange** action to the Blueprint graph context menu (right-click on a node or the graph background). It runs a layered layout algorithm — longest-path ranking, barycenter crossing reduction, and per-column coordinate assignment — and repositions the selected nodes (or all nodes, if nothing is selected).
 
+### Notice
+
+Keep in mind this repos is mainly vibe coded cause I wanted the functionality but didn't find a good free solution for this
+
 ## Features
 
 - **Sugiyama-style layered layout**: nodes are ranked into columns by longest-path, then ordered within each column by pin-index-weighted barycenter to reduce edge crossings.
 - **Per-column tight packing**: each column is packed to its own node heights instead of a single global track height, keeping the graph compact without large vertical gaps.
 - **Exec-edge awareness**: exec pins are weighted more heavily than data pins so execution flow drives the vertical ordering.
 - **Selection-aware**: arranges only the selected nodes; falls back to all nodes in the graph when nothing is selected.
-- **Grid-snapped**: all output positions are snapped to the 16-unit grid and centered on the original bounding box.
+- **Grid-snapped**: all output positions are snapped to the 16-unit grid and cantered on the original bounding box.
 
 ## Installation
 
