@@ -52,20 +52,22 @@ namespace
 		bool bExec;
 	};
 
-	// Weight for a pin index: lower index (visually higher) → larger weight so the
-	// neighbor is pulled toward the top. Exec edges are amplified by ExecMultiplier.
-	// PinIndex is the visible (non-hidden) pin index, or INDEX_NONE for untracked.
+	// Exec edges are amplified by ExecMultiplier so they dominate crossing
+	// reduction over data edges. Pin ordering is handled separately via a
+	// pin-index offset added to the barycenter (see PinOrderScale / PinPixelScale).
 	constexpr float ExecMultiplier = 10.0f;
-	auto PinWeight = [](int32 PinIndex, bool bExec) -> float
+	auto PinWeight = [](bool bExec) -> float
 	{
-		if (PinIndex < 0)
-		{
-			return 1.0f; // untracked / fallback
-		}
-		// +1 so pin 0 still has positive weight; invert so lower index = higher weight.
-		float W = 1.0f / static_cast<float>(PinIndex + 1);
-		return bExec ? W * ExecMultiplier : W;
+		return bExec ? ExecMultiplier : 1.0f;
 	};
+
+	// Pin-index offset added to the barycenter so neighbours connected through
+	// lower pins (visually higher on the node) are pulled toward the top of the
+	// column. This survives the weight normalisation (unlike a pure weight
+	// multiplier, which cancels out for single-neighbour nodes). PinIndex is the
+	// visible (non-hidden) pin index, or INDEX_NONE for untracked.
+	constexpr float PinOrderScale = 0.75f; // ordering space: order slots per pin step
+	constexpr float PinPixelScale = 24.0f;  // coordinate space: approx visual pin spacing
 
 	// Visible (non-hidden) pin index in the node's Pins array, which matches the
 	// visual top-to-bottom render order.
@@ -308,8 +310,9 @@ int32 ArrangeNodes(const TArray<UEdGraphNode*>& Nodes, const FBlueprintArrangeLa
 				float WeightedOrder = 0.f;
 				for (const FNeighborLink& Link : Neighbors)
 				{
-					const float W = PinWeight(Link.PinIndex, Link.bExec);
-					WeightedOrder += W * static_cast<float>(OrderOf[Link.NeighborNode]);
+					const float W = PinWeight(Link.bExec);
+					const int32 PinIdx = FMath::Max(0, Link.PinIndex);
+					WeightedOrder += W * (static_cast<float>(OrderOf[Link.NeighborNode]) + PinIdx * PinOrderScale);
 					WeightSum += W;
 				}
 				Keys.Add({WeightSum > 0.f ? WeightedOrder / WeightSum : static_cast<float>(OrderOf[n]), n});
@@ -337,48 +340,112 @@ int32 ArrangeNodes(const TArray<UEdGraphNode*>& Nodes, const FBlueprintArrangeLa
 	}
 
 	// ---------------------------------------------------------------------
-	// 5. Coordinates: per-column tight packing. Each rank (column) stacks its
-	//    nodes top-to-bottom using each node's own estimated height, so columns
-	//    with only short nodes no longer inherit the tallest node's height from
-	//    other columns. This removes the large vertical gaps the uniform-track
-	//    scheme produced. Empty nodes are placed in a separate bottom band.
-	//    Snapped to the 16-unit grid, centered on original bounding box.
+	// 5. Coordinates: barycenter coordinate assignment. We alternate down
+	//    (rank 0 -> MaxRank, pulling each column toward its upstream
+	//    neighbours) and up (MaxRank -> 0, pulling toward downstream
+	//    neighbours) sweeps. On every sweep a column's nodes first get a
+	//    desired Y = pin-weighted average of the already-placed neighbours'
+	//    actual Y, then the column is packed top-to-bottom preserving the
+	//    Phase-4 order while following that desired Y (never overlapping).
+	//    Because neighbours can sit several ranks away, edges that skip
+	//    intermediate columns still align their endpoints, so long edges no
+	//    longer cut through nodes in between. Empty nodes are excluded from
+	//    the relaxation and dropped into a separate bottom band afterwards.
+	//    Final positions are snapped to the 16-unit grid and centered on the
+	//    nodes' original bounding box.
 	// ---------------------------------------------------------------------
 	TArray<int32> NewX;
 	TArray<int32> NewY;
 	NewX.Init(0, NumNodes);
 	NewY.Init(0, NumNodes);
 
-	int32 ConnectedBottom = 0; // tallest connected column (for the empty band).
+	TArray<float> DesiredY;
+	DesiredY.Init(0.f, NumNodes);
 
-	for (int32 r = 0; r <= MaxRank; ++r)
+	constexpr int32 NumCoordSweeps = 8;
+	for (int32 Sweep = 0; Sweep < NumCoordSweeps; ++Sweep)
 	{
-		const int32 ColumnX = r * Settings.ColumnSpacing;
-		int32 CursorY = 0;        // running Y for connected nodes in this column.
-		int32 EmptyCursorY = 0;   // running Y for empty nodes in this column.
-
-		for (int32 n : Ranks[r])
+		const bool bDownward = (Sweep % 2) == 0;
+		for (int32 ri = 0; ri <= MaxRank; ++ri)
 		{
-			NewX[n] = ColumnX;
-			const int32 NodeH = EstimateNodeHeight(Nodes[n]);
-			if (EmptyNodeIndices.Contains(n))
+			const int32 r = bDownward ? ri : MaxRank - ri;
+			const int32 ColumnX = r * Settings.ColumnSpacing;
+
+			// Desired Y per node from the already-placed opposite column(s).
+			// Neighbours may be several ranks away (edges that skip columns),
+			// but they are always placed earlier in this sweep, so their Y is
+			// current.
+			for (int32 n : Ranks[r])
 			{
-				NewY[n] = EmptyCursorY;
-				EmptyCursorY += NodeH + Settings.RowSpacing;
+				if (EmptyNodeIndices.Contains(n))
+				{
+					DesiredY[n] = static_cast<float>(NewY[n]);
+					continue;
+				}
+				const TArray<FNeighborLink>& Neighbors = bDownward ? Upstream[n] : Downstream[n];
+				if (Neighbors.Num() == 0)
+				{
+					DesiredY[n] = static_cast<float>(NewY[n]);
+					continue;
+				}
+				float WeightSum = 0.f;
+				float WeightedY = 0.f;
+				for (const FNeighborLink& Link : Neighbors)
+				{
+					const float W = PinWeight(Link.bExec);
+					const int32 PinIdx = FMath::Max(0, Link.PinIndex);
+					// Offset in pixel space so the node sits opposite its source pin:
+					// upstream (downward sweep) → positive offset (lower pin = lower Y),
+					// downstream (upward sweep) → also positive (lower output pin = lower Y).
+					const float PinOffset = bDownward ? (PinIdx * PinPixelScale) : (PinIdx * PinPixelScale);
+					WeightedY += W * (static_cast<float>(NewY[Link.NeighborNode]) + PinOffset);
+					WeightSum += W;
+				}
+				DesiredY[n] = WeightSum > 0.f ? WeightedY / WeightSum : static_cast<float>(NewY[n]);
 			}
-			else
+
+			// Pack this column preserving the Phase-4 order while following
+			// the desired Y. The monotonic cursor guarantees no overlap and
+			// keeps the pin-aware within-column order intact; the desired Y
+			// aligns the column with its connected neighbours across columns.
+			int32 CursorY = 0;      // running Y for connected nodes (monotonic).
+			int32 EmptyCursorY = 0; // running Y for empty nodes (separate band).
+			for (int32 n : Ranks[r])
 			{
-				NewY[n] = CursorY;
-				CursorY += NodeH + Settings.RowSpacing;
+				NewX[n] = ColumnX;
+				const int32 NodeH = EstimateNodeHeight(Nodes[n]);
+				if (EmptyNodeIndices.Contains(n))
+				{
+					NewY[n] = EmptyCursorY;
+					EmptyCursorY += NodeH + Settings.RowSpacing;
+				}
+				else
+				{
+					const int32 Desired = FMath::Max(0, FMath::RoundToInt(DesiredY[n]));
+					CursorY = FMath::Max(CursorY, Desired);
+					NewY[n] = CursorY;
+					CursorY += NodeH + Settings.RowSpacing;
+				}
 			}
 		}
-
-		// The empty band must sit below the tallest connected column so empty
-		// nodes never overlap connected ones. Track the max connected bottom.
-		ConnectedBottom = FMath::Max(ConnectedBottom, CursorY);
 	}
 
-	// Drop the empty band below the tallest connected column.
+	// Drop the empty band below the tallest connected column so empty nodes
+	// never overlap connected ones.
+	int32 ConnectedBottom = 0;
+	for (int32 r = 0; r <= MaxRank; ++r)
+	{
+		int32 ColumnBottom = 0;
+		for (int32 n : Ranks[r])
+		{
+			if (EmptyNodeIndices.Contains(n))
+			{
+				continue;
+			}
+			ColumnBottom = FMath::Max(ColumnBottom, NewY[n] + EstimateNodeHeight(Nodes[n]) + Settings.RowSpacing);
+		}
+		ConnectedBottom = FMath::Max(ConnectedBottom, ColumnBottom);
+	}
 	for (int32 i = 0; i < NumNodes; ++i)
 	{
 		if (EmptyNodeIndices.Contains(i))
