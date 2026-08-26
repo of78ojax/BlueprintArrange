@@ -281,9 +281,14 @@ int32 ArrangeNodes(const TArray<UEdGraphNode*>& Nodes, const FBlueprintArrangeLa
 
 	// ---------------------------------------------------------------------
 	// 3. Ranking: longest-path via iterative relaxation (cycle-safe).
+	//    Forward pass pushes consumers right; reverse pass (tightening)
+	//    pulls sources toward their consumers so data-input nodes land
+	//    just before the node that uses them instead of column 0.
 	// ---------------------------------------------------------------------
 	TArray<int32> Rank;
 	Rank.Init(0, NumNodes);
+
+	// Forward relaxation: Rank[consumer] >= Rank[source] + 1.
 	for (int32 Pass = 0; Pass < NumNodes; ++Pass)
 	{
 		bool bChanged = false;
@@ -292,6 +297,57 @@ int32 ArrangeNodes(const TArray<UEdGraphNode*>& Nodes, const FBlueprintArrangeLa
 			if (Rank[E.To] < Rank[E.From] + 1)
 			{
 				Rank[E.To] = Rank[E.From] + 1;
+				bChanged = true;
+			}
+		}
+		if (!bChanged)
+		{
+			break;
+		}
+	}
+
+	// Reverse relaxation (tightening): pull each node as close to its
+	// consumers as possible.  Rank[n] is raised toward min(consumer)-1
+	// but never above it, and never below max(source)+1.  Nodes on the
+	// critical path are already tight and won't move; only "loose" nodes
+	// (e.g. data-only sources left at rank 0 by the forward pass) get
+	// pulled right to sit just before the node that consumes them.
+	for (int32 Pass = 0; Pass < NumNodes; ++Pass)
+	{
+		bool bChanged = false;
+		for (int32 n = 0; n < NumNodes; ++n)
+		{
+			if (EmptyNodeIndices.Contains(n))
+			{
+				continue;
+			}
+
+			int32 MinConsumerRank = MAX_int32;
+			for (const FArrangeEdge& E : EdgeList)
+			{
+				if (E.From == n)
+				{
+					MinConsumerRank = FMath::Min(MinConsumerRank, Rank[E.To]);
+				}
+			}
+			if (MinConsumerRank == MAX_int32)
+			{
+				continue; // no outgoing edges — sink, nothing to pull
+			}
+
+			int32 MaxSourceRank = -1;
+			for (const FArrangeEdge& E : EdgeList)
+			{
+				if (E.To == n)
+				{
+					MaxSourceRank = FMath::Max(MaxSourceRank, Rank[E.From]);
+				}
+			}
+
+			const int32 NewRank = FMath::Max(MinConsumerRank - 1, MaxSourceRank + 1);
+			if (NewRank > Rank[n])
+			{
+				Rank[n] = NewRank;
 				bChanged = true;
 			}
 		}
@@ -444,6 +500,16 @@ int32 ArrangeNodes(const TArray<UEdGraphNode*>& Nodes, const FBlueprintArrangeLa
 	TArray<float> DesiredY;
 	DesiredY.Init(0.f, NumNodes);
 
+	// Effective column pitch: base spacing plus the widest node in the whole
+	// selection, so right-aligned columns never overlap regardless of node
+	// widths. The gap between adjacent columns is at least ColumnSpacing.
+	int32 MaxNodeWidth = 0;
+	for (const FNodeSize& S : NodeSizes)
+	{
+		MaxNodeWidth = FMath::Max(MaxNodeWidth, S.Width);
+	}
+	const int32 ColumnPitch = Settings.ColumnSpacing + MaxNodeWidth;
+
 	constexpr int32 NumCoordSweeps = 8;
 	for (int32 Sweep = 0; Sweep < NumCoordSweeps; ++Sweep)
 	{
@@ -451,7 +517,7 @@ int32 ArrangeNodes(const TArray<UEdGraphNode*>& Nodes, const FBlueprintArrangeLa
 		for (int32 ri = 0; ri <= MaxRank; ++ri)
 		{
 			const int32 r = bDownward ? ri : MaxRank - ri;
-			const int32 ColumnX = r * Settings.ColumnSpacing;
+			const int32 ColumnX = r * ColumnPitch;
 
 			// Desired Y per node from the already-placed opposite column(s).
 			// Neighbours may be several ranks away (edges that skip columns),
@@ -490,11 +556,20 @@ int32 ArrangeNodes(const TArray<UEdGraphNode*>& Nodes, const FBlueprintArrangeLa
 			// the desired Y. The monotonic cursor guarantees no overlap and
 			// keeps the pin-aware within-column order intact; the desired Y
 			// aligns the column with its connected neighbours across columns.
+			// Nodes are right-aligned within the column: the widest node's
+			// right edge defines the column edge, narrower nodes are shifted
+			// right so all right edges line up (cleaner wire entry points).
+			int32 MaxWidthInColumn = 0;
+			for (int32 n : Ranks[r])
+			{
+				MaxWidthInColumn = FMath::Max(MaxWidthInColumn, NodeSizes[n].Width);
+			}
+
 			int32 CursorY = 0;      // running Y for connected nodes (monotonic).
 			int32 EmptyCursorY = 0; // running Y for empty nodes (separate band).
 			for (int32 n : Ranks[r])
 			{
-				NewX[n] = ColumnX;
+				NewX[n] = ColumnX + MaxWidthInColumn - NodeSizes[n].Width;
 				const int32 NodeH = NodeSizes[n].Height;
 				if (EmptyNodeIndices.Contains(n))
 				{

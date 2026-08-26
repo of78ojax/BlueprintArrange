@@ -10,7 +10,7 @@ class UEdGraphNode;
 /** Hardcoded layout tuning (no settings UI in v1). */
 struct FBlueprintArrangeLayoutSettings
 {
-	int32 ColumnSpacing = 320;
+	int32 ColumnSpacing = 80;   // horizontal gap between adjacent columns
 	int32 RowSpacing = 90;
 
 	// --- Fallback node size estimation (used only when the real Slate widget
