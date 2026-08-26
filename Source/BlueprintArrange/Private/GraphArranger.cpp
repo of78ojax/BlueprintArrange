@@ -6,11 +6,14 @@
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
+#include "GraphEditor.h"
+#include "SGraphPanel.h"
 
 namespace
 {
-	// Widget-free height estimate: base height plus a fixed amount per pin on the busier side.
-	int32 EstimateNodeHeight(const UEdGraphNode* Node)
+	// Pin-based height fallback used when the node's Slate widget isn't
+	// available (graph panel not open, node not yet ticked, etc.).
+	int32 EstimateNodeHeight(const UEdGraphNode* Node, const FBlueprintArrangeLayoutSettings& Settings)
 	{
 		int32 InPinCount = 0;
 		int32 OutPinCount = 0;
@@ -29,7 +32,80 @@ namespace
 				++OutPinCount;
 			}
 		}
-		return FMath::Clamp(56 + 24 * FMath::Max(InPinCount, OutPinCount), 96, 512);
+		return FMath::Clamp(
+			Settings.FallbackBaseHeight + Settings.FallbackPinHeight * FMath::Max(InPinCount, OutPinCount),
+			Settings.FallbackMinHeight,
+			Settings.FallbackMaxHeight);
+	}
+
+	// Node size cache: resolves the real rendered size of each node from its
+	// Slate widget when available, falling back to pin-based estimation.
+	struct FNodeSize
+	{
+		int32 Width;
+		int32 Height;
+	};
+
+	// Build a size lookup for all nodes. Tries SGraphPanel::GetBoundsForNode
+	// first (exact rendered size), then falls back to pin-count estimation.
+	// Returns node index -> size.
+	TArray<FNodeSize> BuildNodeSizes(
+		const TArray<UEdGraphNode*>& Nodes,
+		const UEdGraph* Graph,
+		const FBlueprintArrangeLayoutSettings& Settings)
+	{
+		const int32 NumNodes = Nodes.Num();
+		TArray<FNodeSize> Sizes;
+		Sizes.SetNum(NumNodes);
+
+		// Try to grab the graph panel hosting these nodes.
+		TSharedPtr<SGraphEditor> GraphEditor;
+		SGraphPanel* GraphPanel = nullptr;
+		if (Graph)
+		{
+			GraphEditor = SGraphEditor::FindGraphEditorForGraph(Graph);
+			if (GraphEditor)
+			{
+				GraphPanel = GraphEditor->GetGraphPanel();
+			}
+		}
+
+		for (int32 i = 0; i < NumNodes; ++i)
+		{
+			const UEdGraphNode* Node = Nodes[i];
+			if (!Node)
+			{
+				Sizes[i] = {Settings.FallbackDefaultWidth, Settings.FallbackMinHeight};
+				continue;
+			}
+
+			bool bGotRealSize = false;
+
+			// 1. SGraphPanel::GetBoundsForNode — exact rendered bounds.
+			if (GraphPanel)
+			{
+				FVector2f MinCorner(0, 0);
+				FVector2f MaxCorner(0, 0);
+				if (GraphPanel->GetBoundsForNode(Node, MinCorner, MaxCorner, 0.f))
+				{
+					const int32 W = FMath::TruncToInt(MaxCorner.X - MinCorner.X);
+					const int32 H = FMath::TruncToInt(MaxCorner.Y - MinCorner.Y);
+					if (W > 0 && H > 0)
+					{
+						Sizes[i] = {W, H};
+						bGotRealSize = true;
+					}
+				}
+			}
+
+			// 2. Fallback to pin-count estimation.
+			if (!bGotRealSize)
+			{
+				Sizes[i] = {Settings.FallbackDefaultWidth, EstimateNodeHeight(Node, Settings)};
+			}
+		}
+
+		return Sizes;
 	}
 
 	struct FArrangeEdge
@@ -114,6 +190,12 @@ int32 ArrangeNodes(const TArray<UEdGraphNode*>& Nodes, const FBlueprintArrangeLa
 			NodeToIndex.Add(Nodes[i], i);
 		}
 	}
+
+	// ---------------------------------------------------------------------
+	// 1b. Resolve real node sizes from the Slate widgets (with fallback).
+	// ---------------------------------------------------------------------
+	const UEdGraph* HostGraph = Nodes[0] ? Nodes[0]->GetGraph() : nullptr;
+	const TArray<FNodeSize> NodeSizes = BuildNodeSizes(Nodes, HostGraph, Settings);
 
 	// ---------------------------------------------------------------------
 	// 2. Edges: output pin owner -> linked input pin owner.
@@ -413,7 +495,7 @@ int32 ArrangeNodes(const TArray<UEdGraphNode*>& Nodes, const FBlueprintArrangeLa
 			for (int32 n : Ranks[r])
 			{
 				NewX[n] = ColumnX;
-				const int32 NodeH = EstimateNodeHeight(Nodes[n]);
+				const int32 NodeH = NodeSizes[n].Height;
 				if (EmptyNodeIndices.Contains(n))
 				{
 					NewY[n] = EmptyCursorY;
@@ -442,7 +524,7 @@ int32 ArrangeNodes(const TArray<UEdGraphNode*>& Nodes, const FBlueprintArrangeLa
 			{
 				continue;
 			}
-			ColumnBottom = FMath::Max(ColumnBottom, NewY[n] + EstimateNodeHeight(Nodes[n]) + Settings.RowSpacing);
+			ColumnBottom = FMath::Max(ColumnBottom, NewY[n] + NodeSizes[n].Height + Settings.RowSpacing);
 		}
 		ConnectedBottom = FMath::Max(ConnectedBottom, ColumnBottom);
 	}
