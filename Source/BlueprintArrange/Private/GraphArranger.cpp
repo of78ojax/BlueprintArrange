@@ -7,7 +7,6 @@
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "GraphEditor.h"
-#include "SGraphEditor.h"
 #include "SGraphPanel.h"
 
 namespace
