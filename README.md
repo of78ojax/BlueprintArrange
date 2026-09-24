@@ -15,6 +15,7 @@ Keep in mind this repos is mainly vibe coded cause I wanted the functionality bu
 - **Exec-edge awareness**: exec pins are weighted more heavily than data pins so execution flow drives the vertical ordering.
 - **Loop-safe**: loop-back wires are detected and ignored for layout, so loops don't stretch the graph.
 - **Reroute-aware**: reroute (knot) nodes don't get a column of their own; selected knots are placed right after the node that feeds them.
+- **Compact inputs**: leaf data nodes that feed a single node (getters, literals, material constants and parameters) are attached right before that node, each level with its pin, instead of taking a column slot. Data-only nodes stack with a smaller vertical gap.
 - **Straight wires**: nodes are aligned pin-to-pin, using the real pin positions when the graph is open.
 - **Selection or whole graph**: *Arrange Selection* (needs at least 2 selected nodes) or *Arrange Graph*.
 - **Undoable**: one "Arrange Nodes" transaction, Ctrl+Z restores the previous layout.
@@ -50,6 +51,8 @@ struct FBlueprintArrangeLayoutSettings
 {
     int32 ColumnSpacing = 80;   // gap between a column's widest node and the next column
     int32 RowSpacing = 90;      // vertical gap between nodes within a column
+    int32 DataRowSpacing = 24;  // gap between two stacked data-only nodes
+    int32 FeederSpacing = 48;   // gap between an attached getter/constant and its consumer
     // ... plus fallback sizes used when a node's widget hasn't been drawn yet
 };
 ```

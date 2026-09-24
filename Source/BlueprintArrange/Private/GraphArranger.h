@@ -12,6 +12,8 @@ struct FBlueprintArrangeLayoutSettings
 {
 	int32 ColumnSpacing = 80;   // horizontal gap between a column's widest node and the next column
 	int32 RowSpacing = 90;
+	int32 DataRowSpacing = 24;  // vertical gap between two stacked data-only (no exec pin) nodes
+	int32 FeederSpacing = 48;   // horizontal gap between a feeder (getter, constant, ...) and its consumer
 
 	// --- Fallback node size estimation (used only when the real Slate widget
 	//     size is unavailable, e.g. the graph panel isn't open / hasn't ticked).
@@ -61,7 +63,9 @@ int32 RefitCommentFrames(const TArray<FCommentFrame>& Frames, const FBlueprintAr
  * ranking with tightening, barycenter crossing reduction, and per-column
  * coordinate assignment that aims for straight wires. Reroute (knot) nodes
  * don't get columns of their own; selected knots are placed in the gap after
- * their source node. Positions are written directly to NodePosX/NodePosY,
+ * their source node. Leaf data nodes that feed a single node (getters,
+ * constants, parameters) are attached to the left of that node instead of
+ * taking a column slot; the pair is laid out as one block. Positions are written directly to NodePosX/NodePosY,
  * snapped to the 16-unit grid, centered on the nodes' original bounding box.
  *
  * @param Nodes  The nodes to arrange: non-null, unique, no comment nodes.

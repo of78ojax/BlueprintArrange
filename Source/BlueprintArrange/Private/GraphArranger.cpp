@@ -51,6 +51,8 @@ namespace
 		bool bIsExec = false;
 		/** True if this edge closes a cycle; ignored by ranking and placement. */
 		bool bIsFeedback = false;
+		/** True if the wire runs through one or more reroute nodes. */
+		bool bViaKnot = false;
 	};
 
 	struct FNeighborLink
@@ -265,8 +267,6 @@ namespace
 	struct FEdgeCollection
 	{
 		TArray<FArrangeEdge> Edges;
-		/** Nodes with no incoming or outgoing edges within the selection. */
-		TSet<int32> EmptyNodeIndices;
 		/** Selected knots reached from a real node, keyed by knot. */
 		TMap<UEdGraphNode*, FKnotPlacement> Knots;
 	};
@@ -355,26 +355,201 @@ namespace
 					Edge.SourcePin = SourceLayout;
 					Edge.TargetPin = GetPinLayout(TargetNode, Link.Pin, GraphPanel, Settings);
 					Edge.bIsExec = IsExecPin(Pin) && IsExecPin(Link.Pin);
+					Edge.bViaKnot = Link.KnotDepth > 0;
 				}
 			}
 		}
 
-		// Identify "empty" nodes: no incoming or outgoing edges within the selection.
+		return Result;
+	}
+
+	// "Empty" nodes: no incoming or outgoing edges within the selection.
+	TSet<int32> FindEmptyNodes(const TArray<FArrangeEdge>& Edges, int32 NumNodes)
+	{
 		TBitArray<> Connected(false, NumNodes);
-		for (const FArrangeEdge& E : Result.Edges)
+		for (const FArrangeEdge& E : Edges)
 		{
 			Connected[E.From] = true;
 			Connected[E.To] = true;
 		}
+		TSet<int32> Empty;
 		for (int32 i = 0; i < NumNodes; ++i)
 		{
 			if (!Connected[i])
 			{
-				Result.EmptyNodeIndices.Add(i);
+				Empty.Add(i);
+			}
+		}
+		return Empty;
+	}
+
+	// ======================================================================
+	//  Phase 2b: Feeder blocks
+	// ======================================================================
+
+	bool HasExecPins(const UEdGraphNode* Node)
+	{
+		for (const UEdGraphPin* Pin : Node->Pins)
+		{
+			if (IsPinVisible(Node, Pin) && IsExecPin(Pin))
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+
+	// A leaf data node (getter, constant, parameter, ...) attached to the left
+	// of the one node it feeds.
+	struct FFeeder
+	{
+		int32 Node;
+		/** Top of the feeder relative to the consumer's top. */
+		int32 RelY = 0;
+		/** Consumer input pin it lines up with; orders the stack. */
+		int32 TargetSideIndex = 0;
+		float SourcePinY = 0.f;
+		float TargetPinY = 0.f;
+	};
+
+	// The layout sees a consumer and its feeders as one block, so their space
+	// is reserved by ranking and column packing like any other node.
+	struct FFeederBlocks
+	{
+		/** Real node index -> layout index, INDEX_NONE for feeders. */
+		TArray<int32> LayoutIndexOf;
+		/** Layout index -> real node index. */
+		TArray<int32> RealIndexOf;
+		/** Per real node: its feeders (empty unless it is a consumer). */
+		TArray<TArray<FFeeder>> FeedersOf;
+		/** Per layout node: block size and the consumer's offset inside it. */
+		TArray<FNodeSize> BlockSizes;
+		TArray<FIntPoint> ConsumerOffset;
+		/** Edges between layout nodes, pin offsets relative to the block. */
+		TArray<FArrangeEdge> Edges;
+	};
+
+	// A feeder has no inputs within the selection, no exec pins, and every
+	// outgoing edge goes straight (no reroutes) into the same consumer.
+	// Structural, so it covers Blueprint getters/literals and material
+	// constants/parameters alike.
+	FFeederBlocks BuildFeederBlocks(
+		const TArray<FArrangeEdge>& Edges,
+		const TMap<UEdGraphNode*, FKnotPlacement>& Knots,
+		const TArray<UEdGraphNode*>& Nodes,
+		const TArray<FNodeSize>& NodeSizes,
+		const FBlueprintArrangeLayoutSettings& Settings)
+	{
+		const int32 NumNodes = Nodes.Num();
+
+		TArray<int32> InCount;
+		InCount.Init(0, NumNodes);
+		TArray<int32> Consumer;
+		Consumer.Init(INDEX_NONE, NumNodes);
+		TBitArray<> Disqualified(false, NumNodes);
+		// Knots are placed right after their source, which would be inside the block.
+		for (const TPair<UEdGraphNode*, FKnotPlacement>& Knot : Knots)
+		{
+			Disqualified[Knot.Value.SourceNode] = true;
+		}
+		for (const FArrangeEdge& E : Edges)
+		{
+			++InCount[E.To];
+			if (E.bIsExec || E.bViaKnot || (Consumer[E.From] != INDEX_NONE && Consumer[E.From] != E.To))
+			{
+				Disqualified[E.From] = true;
+			}
+			Consumer[E.From] = E.To;
+		}
+
+		FFeederBlocks Blocks;
+		Blocks.FeedersOf.SetNum(NumNodes);
+		Blocks.LayoutIndexOf.Init(INDEX_NONE, NumNodes);
+
+		TBitArray<> IsFeeder(false, NumNodes);
+		for (int32 n = 0; n < NumNodes; ++n)
+		{
+			// The consumer always has an input, so it can't be a feeder itself.
+			IsFeeder[n] = InCount[n] == 0 && Consumer[n] != INDEX_NONE && !Disqualified[n] && !HasExecPins(Nodes[n]);
+		}
+
+		// Each feeder lines up with the topmost consumer pin it feeds.
+		for (const FArrangeEdge& E : Edges)
+		{
+			if (!IsFeeder[E.From])
+			{
+				continue;
+			}
+			TArray<FFeeder>& Feeders = Blocks.FeedersOf[E.To];
+			FFeeder* Existing = Feeders.FindByPredicate([&E](const FFeeder& F) { return F.Node == E.From; });
+			if (!Existing)
+			{
+				Existing = &Feeders.AddDefaulted_GetRef();
+				Existing->Node = E.From;
+				Existing->TargetSideIndex = MAX_int32;
+			}
+			if (E.TargetPin.SideIndex < Existing->TargetSideIndex)
+			{
+				Existing->TargetSideIndex = E.TargetPin.SideIndex;
+				Existing->SourcePinY = E.SourcePin.OffsetY;
+				Existing->TargetPinY = E.TargetPin.OffsetY;
 			}
 		}
 
-		return Result;
+		for (int32 n = 0; n < NumNodes; ++n)
+		{
+			if (IsFeeder[n])
+			{
+				continue;
+			}
+			Blocks.LayoutIndexOf[n] = Blocks.RealIndexOf.Add(n);
+
+			TArray<FFeeder>& Feeders = Blocks.FeedersOf[n];
+			FNodeSize Block = NodeSizes[n];
+			FIntPoint Offset(0, 0);
+			if (!Feeders.IsEmpty())
+			{
+				Feeders.StableSort([](const FFeeder& A, const FFeeder& B) { return A.TargetSideIndex < B.TargetSideIndex; });
+
+				// Stack top to bottom, each output pin level with its input pin
+				// unless the feeder above is in the way.
+				int32 Cursor = MIN_int32;
+				int32 StackTop = MAX_int32;
+				int32 StackBottom = MIN_int32;
+				int32 MaxFeederWidth = 0;
+				for (FFeeder& F : Feeders)
+				{
+					const FNodeSize& Size = NodeSizes[F.Node];
+					F.RelY = FMath::Max(Cursor, FMath::RoundToInt(F.TargetPinY - F.SourcePinY));
+					Cursor = F.RelY + Size.Height + Settings.DataRowSpacing;
+					StackTop = FMath::Min(StackTop, F.RelY);
+					StackBottom = FMath::Max(StackBottom, F.RelY + Size.Height);
+					MaxFeederWidth = FMath::Max(MaxFeederWidth, Size.Width);
+				}
+
+				Offset.X = MaxFeederWidth + Settings.FeederSpacing;
+				Offset.Y = FMath::Max(0, -StackTop);
+				Block.Width = Offset.X + NodeSizes[n].Width;
+				Block.Height = Offset.Y + FMath::Max(NodeSizes[n].Height, StackBottom);
+			}
+			Blocks.BlockSizes.Add(Block);
+			Blocks.ConsumerOffset.Add(Offset);
+		}
+
+		for (const FArrangeEdge& E : Edges)
+		{
+			if (IsFeeder[E.From])
+			{
+				continue;
+			}
+			FArrangeEdge& LayoutEdge = Blocks.Edges.Add_GetRef(E);
+			LayoutEdge.From = Blocks.LayoutIndexOf[E.From];
+			LayoutEdge.To = Blocks.LayoutIndexOf[E.To];
+			LayoutEdge.SourcePin.OffsetY += Blocks.ConsumerOffset[LayoutEdge.From].Y;
+			LayoutEdge.TargetPin.OffsetY += Blocks.ConsumerOffset[LayoutEdge.To].Y;
+		}
+
+		return Blocks;
 	}
 
 	// ======================================================================
@@ -704,12 +879,14 @@ namespace
 	// pin (weighted average over all links), then the column is packed
 	// top-to-bottom preserving the crossing-reduction order while following
 	// that desired Y (never overlapping). Each column is as wide as its widest
-	// node and nodes are right-aligned within it. Empty nodes are excluded
-	// from the relaxation.
+	// node and nodes are right-aligned within it. Two data-only nodes stacked
+	// directly on top of each other use the smaller DataRowSpacing. Empty
+	// nodes are excluded from the relaxation.
 	FCoordinates AssignCoordinates(
 		const TArray<TArray<int32>>& Ranks,
 		int32 MaxRank,
 		const TArray<FNodeSize>& NodeSizes,
+		const TBitArray<>& IsDataNode,
 		const TSet<int32>& EmptyNodeIndices,
 		const FAdjacency& Adj,
 		const FBlueprintArrangeLayoutSettings& Settings)
@@ -777,21 +954,33 @@ namespace
 
 				// Pack this column preserving order while following the desired Y.
 				// Not clamped to 0: a node may need to sit above its neighbour.
-				int32 CursorY = MIN_int32;  // running Y for connected nodes (monotonic).
-				int32 EmptyCursorY = 0;     // running Y for empty nodes (separate band).
+				// Connected nodes and empty nodes (separate band) each keep a
+				// running bottom edge and the node that produced it.
+				int32 Bottom = MIN_int32, Above = INDEX_NONE;
+				int32 EmptyBottom = 0, EmptyAbove = INDEX_NONE;
+				auto MinTop = [&IsDataNode, &Settings](int32 PrevBottom, int32 Prev, int32 n) -> int32
+				{
+					if (Prev == INDEX_NONE)
+					{
+						return PrevBottom;
+					}
+					const bool bCompact = IsDataNode[Prev] && IsDataNode[n];
+					return PrevBottom + (bCompact ? Settings.DataRowSpacing : Settings.RowSpacing);
+				};
 				for (const int32 n : Ranks[r])
 				{
 					const int32 NodeH = NodeSizes[n].Height;
 					if (EmptyNodeIndices.Contains(n))
 					{
-						Coords.NewY[n] = EmptyCursorY;
-						EmptyCursorY += NodeH + Settings.RowSpacing;
+						Coords.NewY[n] = MinTop(EmptyBottom, EmptyAbove, n);
+						EmptyBottom = Coords.NewY[n] + NodeH;
+						EmptyAbove = n;
 					}
 					else
 					{
-						CursorY = FMath::Max(CursorY, FMath::RoundToInt(DesiredY[n]));
-						Coords.NewY[n] = CursorY;
-						CursorY += NodeH + Settings.RowSpacing;
+						Coords.NewY[n] = FMath::Max(MinTop(Bottom, Above, n), FMath::RoundToInt(DesiredY[n]));
+						Bottom = Coords.NewY[n] + NodeH;
+						Above = n;
 					}
 				}
 			}
@@ -925,6 +1114,35 @@ namespace
 		}
 		return NumMoved;
 	}
+
+	// Place feeders in the left part of their consumer's block, right-aligned
+	// against the consumer. X is grid-snapped; Y is not, so the wire stays
+	// straight.
+	int32 PlaceFeeders(
+		const FFeederBlocks& Blocks,
+		const TArray<UEdGraphNode*>& Nodes,
+		const TArray<FNodeSize>& NodeSizes,
+		const FBlueprintArrangeLayoutSettings& Settings)
+	{
+		int32 NumMoved = 0;
+		for (int32 c = 0; c < Nodes.Num(); ++c)
+		{
+			const UEdGraphNode* Consumer = Nodes[c];
+			for (const FFeeder& F : Blocks.FeedersOf[c])
+			{
+				UEdGraphNode* Feeder = Nodes[F.Node];
+				const int32 FinalX = SnapToGrid(Consumer->NodePosX - Settings.FeederSpacing - NodeSizes[F.Node].Width);
+				const int32 FinalY = Consumer->NodePosY + F.RelY;
+				if (Feeder->NodePosX != FinalX || Feeder->NodePosY != FinalY)
+				{
+					++NumMoved;
+				}
+				Feeder->NodePosX = FinalX;
+				Feeder->NodePosY = FinalY;
+			}
+		}
+		return NumMoved;
+	}
 } // namespace
 
 // ==========================================================================
@@ -968,32 +1186,52 @@ int32 ArrangeNodes(const TArray<UEdGraphNode*>& Nodes, const FBlueprintArrangeLa
 	const SGraphPanel* GraphPanel = FindGraphPanel(RealNodes[0]->GetGraph());
 	const TArray<FNodeSize> NodeSizes = BuildNodeSizes(RealNodes, GraphPanel, Settings);
 
-	// 3. Collect edges (through reroute chains) + identify empty nodes.
-	FEdgeCollection EdgeCol = BuildEdges(RealNodes, NodeToIndex, SelectedKnots, GraphPanel, Settings);
+	// 3. Collect edges (through reroute chains).
+	const FEdgeCollection EdgeCol = BuildEdges(RealNodes, NodeToIndex, SelectedKnots, GraphPanel, Settings);
 
-	// 4. Break cycles, then build the DAG adjacency with pin info.
-	MarkFeedbackEdges(EdgeCol.Edges, NumNodes, RealNodes);
-	const FAdjacency Adj = BuildAdjacency(EdgeCol.Edges, NumNodes);
+	// 4. Fold leaf data nodes into blocks with their consumer. Everything up
+	//    to step 9 works on these blocks ("layout nodes").
+	FFeederBlocks Blocks = BuildFeederBlocks(EdgeCol.Edges, EdgeCol.Knots, RealNodes, NodeSizes, Settings);
+	const int32 NumLayout = Blocks.RealIndexOf.Num();
+	TArray<UEdGraphNode*> LayoutNodes;
+	TBitArray<> IsDataNode(false, NumLayout);
+	for (int32 l = 0; l < NumLayout; ++l)
+	{
+		LayoutNodes.Add(RealNodes[Blocks.RealIndexOf[l]]);
+		IsDataNode[l] = !HasExecPins(LayoutNodes[l]);
+	}
+	const TSet<int32> EmptyNodeIndices = FindEmptyNodes(Blocks.Edges, NumLayout);
 
-	// 5. Ranking: longest-path forward + reverse tightening.
-	const FRanking Ranking = ComputeRanking(NumNodes, Adj);
+	// 5. Break cycles, then build the DAG adjacency with pin info.
+	MarkFeedbackEdges(Blocks.Edges, NumLayout, LayoutNodes);
+	const FAdjacency Adj = BuildAdjacency(Blocks.Edges, NumLayout);
 
-	// 6. Crossing reduction: pin-aware barycenter sweeps.
+	// 6. Ranking: longest-path forward + reverse tightening.
+	const FRanking Ranking = ComputeRanking(NumLayout, Adj);
+
+	// 7. Crossing reduction: pin-aware barycenter sweeps.
 	TArray<TArray<int32>> Ranks = BuildRanksFromRanking(
-		Ranking.Rank, Ranking.MaxRank, NumNodes, EdgeCol.EmptyNodeIndices, RealNodes);
-	ReduceCrossings(Ranks, Ranking.MaxRank, NumNodes, EdgeCol.EmptyNodeIndices, Adj);
+		Ranking.Rank, Ranking.MaxRank, NumLayout, EmptyNodeIndices, LayoutNodes);
+	ReduceCrossings(Ranks, Ranking.MaxRank, NumLayout, EmptyNodeIndices, Adj);
 
-	// 7. Coordinate assignment: pin-aligned Y + per-column right-aligned X.
+	// 8. Coordinate assignment: pin-aligned Y + per-column right-aligned X.
 	FCoordinates Coords = AssignCoordinates(
-		Ranks, Ranking.MaxRank, NodeSizes, EdgeCol.EmptyNodeIndices, Adj, Settings);
+		Ranks, Ranking.MaxRank, Blocks.BlockSizes, IsDataNode, EmptyNodeIndices, Adj, Settings);
 
-	// 8. Drop empty nodes into a separate band below connected ones.
-	PlaceEmptyNodes(NodeSizes, EdgeCol.EmptyNodeIndices, Coords.NewY, Settings);
+	// 9. Drop empty nodes into a separate band below connected ones.
+	PlaceEmptyNodes(Blocks.BlockSizes, EmptyNodeIndices, Coords.NewY, Settings);
 
-	// 9. Snap to grid, center on original bounding box, write back.
-	int32 NumMoved = ApplyPositions(RealNodes, Coords.NewX, Coords.NewY);
+	// 10. Block position -> consumer position, then snap to grid, center on
+	//     the original bounding box and write back. Feeders follow their consumer.
+	for (int32 l = 0; l < NumLayout; ++l)
+	{
+		Coords.NewX[l] += Blocks.ConsumerOffset[l].X;
+		Coords.NewY[l] += Blocks.ConsumerOffset[l].Y;
+	}
+	int32 NumMoved = ApplyPositions(LayoutNodes, Coords.NewX, Coords.NewY);
+	NumMoved += PlaceFeeders(Blocks, RealNodes, NodeSizes, Settings);
 
-	// 10. Put selected knots next to the node that feeds them.
+	// 11. Put selected knots next to the node that feeds them.
 	const TArray<FNodeSize> KnotSizeList = BuildNodeSizes(KnotNodes, GraphPanel, Settings);
 	TMap<UEdGraphNode*, FNodeSize> KnotSizes;
 	for (int32 i = 0; i < KnotNodes.Num(); ++i)

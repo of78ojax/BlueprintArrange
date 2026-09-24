@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Reroute (knot) nodes no longer take a column; selected knots are placed right after their source node.
 - Comment boxes are not laid out themselves; they are refitted around the nodes they framed before arranging (nested comments included).
+- Leaf data nodes feeding a single node are laid out as one block with that node and stacked right before it, level with their pins.
+- Data-only nodes stacked in a column use a smaller gap (`DataRowSpacing`).
 - Each column is only as wide as its own widest node.
 - Wires are aligned pin-to-pin using the real pin widget offsets when available.
 - Ranking is linear in the graph size.

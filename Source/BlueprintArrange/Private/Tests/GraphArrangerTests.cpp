@@ -19,6 +19,8 @@ namespace BlueprintArrangeTests
 {
 	const FBlueprintArrangeLayoutSettings Settings;
 	const int32 ColumnPitch = Settings.FallbackDefaultWidth + Settings.ColumnSpacing;
+	// Two independently grid-snapped positions can each move by half a cell.
+	constexpr int32 GridSizeTolerance = 16;
 
 	struct FTestGraph
 	{
@@ -209,18 +211,20 @@ bool FBlueprintArrangeTighteningTest::RunTest(const FString& Parameters)
 	FTestGraph G;
 	UEdGraphNode* E0 = G.AddNode(0, 0);
 	UEdGraphNode* E1 = G.AddNode(300, 0);
-	UEdGraphNode* E2 = G.AddNode(600, 0);
+	UEdGraphNode* E2 = G.AddNode(600, 0, 1, 1, 1, 0);
 	UEdGraphNode* E3 = G.AddNode(900, 0, 1, 1, 1, 0);
+	// Two consumers, so this is a normal layout node, not a feeder.
 	UEdGraphNode* Data = G.AddNode(0, 300, 0, 0, 0, 1);
 	FTestGraph::Link(E0, 0, E1, 0);
 	FTestGraph::Link(E1, 0, E2, 0);
 	FTestGraph::Link(E2, 0, E3, 0);
+	FTestGraph::Link(Data, 0, E2, 1);
 	FTestGraph::Link(Data, 0, E3, 1);
 
 	ArrangeNodes(G.Nodes, Settings);
 
-	TestEqual(TEXT("Column of E3"), G.ColumnOf(E3), 3);
-	TestEqual(TEXT("Data source sits right before its consumer"), G.ColumnOf(Data), 2);
+	TestEqual(TEXT("Column of E2"), G.ColumnOf(E2), 2);
+	TestEqual(TEXT("Data source sits right before its first consumer"), G.ColumnOf(Data), 1);
 	TestFalse(TEXT("Nodes overlap"), G.AnyOverlap());
 	return true;
 }
@@ -302,6 +306,76 @@ bool FBlueprintArrangeKnotTest::RunTest(const FString& Parameters)
 			Knot->NodePosX >= A->NodePosX + Settings.FallbackDefaultWidth && Knot->NodePosX < B->NodePosX);
 	}
 	TestTrue(TEXT("Knots are ordered along the chain"), K1->NodePosX < K2->NodePosX);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBlueprintArrangeFeederTest, "BlueprintArrange.FeederBlock",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FBlueprintArrangeFeederTest::RunTest(const FString& Parameters)
+{
+	FTestGraph G;
+	UEdGraphNode* A = G.AddNode(0, 0);
+	UEdGraphNode* C = G.AddNode(300, 0, 1, 1, 3, 0);
+	UEdGraphNode* B = G.AddNode(600, 0);
+	FTestGraph::Link(A, 0, C, 0);
+	FTestGraph::Link(C, 0, B, 0);
+	TArray<UEdGraphNode*> Getters;
+	for (int32 i = 0; i < 3; ++i)
+	{
+		// Getter-like: one data output, nothing else.
+		Getters.Add(G.AddNode(-500, 400 * i, 0, 0, 0, 1));
+		FTestGraph::Link(Getters[i], 0, C, 1 + i);
+	}
+
+	ArrangeNodes(G.Nodes, Settings);
+
+	TestFalse(TEXT("Nodes overlap"), G.AnyOverlap());
+	TestEqual(TEXT("Exec chain stays straight (A)"), A->NodePosY, C->NodePosY);
+	TestEqual(TEXT("Exec chain stays straight (B)"), B->NodePosY, C->NodePosY);
+	for (int32 i = 0; i < 3; ++i)
+	{
+		const int32 Gap = C->NodePosX - (Getters[i]->NodePosX + Settings.FallbackDefaultWidth);
+		TestTrue(FString::Printf(TEXT("Getter %d sits right before C (gap %d)"), i, Gap),
+			FMath::Abs(Gap - Settings.FeederSpacing) <= 8);
+		TestTrue(FString::Printf(TEXT("Getter %d is right of A"), i),
+			Getters[i]->NodePosX >= A->NodePosX + Settings.FallbackDefaultWidth);
+	}
+	// Fallback pin centres: getter output at title + half a row, C's first
+	// data input one row lower (below the exec input).
+	TestEqual(TEXT("First getter lines up with its pin"), Getters[0]->NodePosY, C->NodePosY + Settings.FallbackPinHeight);
+	const int32 GetterH = FTestGraph::FallbackHeight(Getters[0]);
+	for (int32 i = 1; i < 3; ++i)
+	{
+		TestEqual(FString::Printf(TEXT("Getter %d stacks tightly"), i),
+			Getters[i]->NodePosY, Getters[i - 1]->NodePosY + GetterH + Settings.DataRowSpacing);
+	}
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBlueprintArrangeDataSpacingTest, "BlueprintArrange.DataRowSpacing",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FBlueprintArrangeDataSpacingTest::RunTest(const FString& Parameters)
+{
+	FTestGraph G;
+	// S feeds two pure nodes, so none of them is a feeder.
+	UEdGraphNode* S = G.AddNode(0, 0, 0, 0, 0, 1);
+	UEdGraphNode* P1 = G.AddNode(300, 0, 0, 0, 1, 1);
+	UEdGraphNode* P2 = G.AddNode(300, 300, 0, 0, 1, 1);
+	UEdGraphNode* T = G.AddNode(600, 0, 1, 1, 2, 0);
+	FTestGraph::Link(S, 0, P1, 0);
+	FTestGraph::Link(S, 0, P2, 0);
+	FTestGraph::Link(P1, 0, T, 1);
+	FTestGraph::Link(P2, 0, T, 2);
+
+	ArrangeNodes(G.Nodes, Settings);
+
+	TestEqual(TEXT("P1 and P2 share a column"), P1->NodePosX, P2->NodePosX);
+	const UEdGraphNode* Upper = P1->NodePosY < P2->NodePosY ? P1 : P2;
+	const UEdGraphNode* Lower = Upper == P1 ? P2 : P1;
+	const int32 Gap = Lower->NodePosY - (Upper->NodePosY + FTestGraph::FallbackHeight(Upper));
+	TestTrue(FString::Printf(TEXT("Data nodes use the compact gap (gap %d)"), Gap),
+		FMath::Abs(Gap - Settings.DataRowSpacing) <= GridSizeTolerance);
+	TestFalse(TEXT("Nodes overlap"), G.AnyOverlap());
 	return true;
 }
 
