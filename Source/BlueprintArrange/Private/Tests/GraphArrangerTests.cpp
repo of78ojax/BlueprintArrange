@@ -10,6 +10,7 @@
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
 #include "K2Node_Knot.h"
+#include "EdGraphNode_Comment.h"
 #include "UObject/Package.h"
 
 // No graph panel is open during tests, so the arranger uses its fallback
@@ -301,6 +302,53 @@ bool FBlueprintArrangeKnotTest::RunTest(const FString& Parameters)
 			Knot->NodePosX >= A->NodePosX + Settings.FallbackDefaultWidth && Knot->NodePosX < B->NodePosX);
 	}
 	TestTrue(TEXT("Knots are ordered along the chain"), K1->NodePosX < K2->NodePosX);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBlueprintArrangeCommentTest, "BlueprintArrange.CommentRefit",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FBlueprintArrangeCommentTest::RunTest(const FString& Parameters)
+{
+	FTestGraph G;
+	UEdGraphNode* A = G.AddNode(0, 0);
+	UEdGraphNode* B = G.AddNode(1000, 800);
+	UEdGraphNode* C = G.AddNode(2000, 0);
+	FTestGraph::Link(A, 0, B, 0);
+	FTestGraph::Link(B, 0, C, 0);
+
+	// Outer comment frames A and B, inner comment frames only B.
+	auto AddComment = [&G](int32 X, int32 Y, int32 W, int32 H)
+	{
+		UEdGraphNode_Comment* Comment = NewObject<UEdGraphNode_Comment>(G.Graph, NAME_None, RF_Transient);
+		Comment->NodePosX = X;
+		Comment->NodePosY = Y;
+		Comment->NodeWidth = W;
+		Comment->NodeHeight = H;
+		G.Graph->AddNode(Comment, false, false);
+		return Comment;
+	};
+	UEdGraphNode_Comment* Outer = AddComment(-100, -100, 1500, 1200);
+	UEdGraphNode_Comment* Inner = AddComment(950, 750, 300, 300);
+
+	auto Contains = [](const UEdGraphNode* Comment, const UEdGraphNode* Node, int32 W, int32 H)
+	{
+		return Node->NodePosX >= Comment->NodePosX && Node->NodePosY >= Comment->NodePosY
+			&& Node->NodePosX + W <= Comment->NodePosX + Comment->NodeWidth
+			&& Node->NodePosY + H <= Comment->NodePosY + Comment->NodeHeight;
+	};
+
+	const TArray<FCommentFrame> Frames = CaptureCommentFrames(G.Graph, Settings);
+	TestEqual(TEXT("Captured frames"), Frames.Num(), 2);
+
+	ArrangeNodes(G.Nodes, Settings);
+	TestEqual(TEXT("Refitted comments"), RefitCommentFrames(Frames, Settings), 2);
+
+	const int32 W = Settings.FallbackDefaultWidth;
+	TestTrue(TEXT("Inner frames B"), Contains(Inner, B, W, FTestGraph::FallbackHeight(B)));
+	TestFalse(TEXT("Inner doesn't frame A"), Contains(Inner, A, W, FTestGraph::FallbackHeight(A)));
+	TestTrue(TEXT("Outer frames A"), Contains(Outer, A, W, FTestGraph::FallbackHeight(A)));
+	TestTrue(TEXT("Outer frames Inner"), Contains(Outer, Inner, Inner->NodeWidth, Inner->NodeHeight));
+	TestFalse(TEXT("Outer doesn't frame C"), Contains(Outer, C, W, FTestGraph::FallbackHeight(C)));
 	return true;
 }
 

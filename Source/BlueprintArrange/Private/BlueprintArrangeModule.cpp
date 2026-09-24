@@ -26,8 +26,8 @@ namespace
 		return Schema && (Schema->IsA<UEdGraphSchema_K2>() || Schema->IsA<UMaterialGraphSchema>());
 	}
 
-	// Nodes the arranger is allowed to move. Comment boxes (including material
-	// comments, which derive from UEdGraphNode_Comment) stay where they are.
+	// Nodes the arranger lays out. Comment boxes (including material comments,
+	// which derive from UEdGraphNode_Comment) are refitted afterwards instead.
 	bool IsArrangeable(const UEdGraphNode* Node)
 	{
 		return Node && !Node->IsA<UEdGraphNode_Comment>();
@@ -92,11 +92,17 @@ namespace
 			Node->Modify();
 		}
 
+		// Comments aren't laid out themselves; remember what each one framed
+		// so it can be refitted around the same nodes afterwards.
+		const TArray<FCommentFrame> CommentFrames = CaptureCommentFrames(Graph);
+
 		if (ArrangeNodes(Nodes) == 0)
 		{
 			Transaction.Cancel();
 			return;
 		}
+
+		RefitCommentFrames(CommentFrames);
 
 		// Materials keep their own copy of node positions on the expressions
 		// (and Material->EditorX/Y for the root). Must run inside the

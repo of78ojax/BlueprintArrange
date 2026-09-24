@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Reroute (knot) nodes no longer take a column; selected knots are placed right after their source node.
-- Comment nodes are left in place.
+- Comment boxes are not laid out themselves; they are refitted around the nodes they framed before arranging (nested comments included).
 - Each column is only as wide as its own widest node.
 - Wires are aligned pin-to-pin using the real pin widget offsets when available.
 - Ranking is linear in the graph size.

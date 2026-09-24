@@ -23,7 +23,7 @@ Keep in mind this repos is mainly vibe coded cause I wanted the functionality bu
 
 ## Known limitations
 
-- Comment boxes are not moved and don't follow the nodes they framed.
+- Comment boxes are resized to frame the same nodes as before. If those nodes end up far apart, the refitted box can also cover nodes that weren't in it.
 - Arranging a selection can overlap surrounding, unselected nodes.
 - Pin positions are only exact for nodes that have been drawn; nodes that were never on screen use estimated sizes, so results can differ slightly after scrolling around.
 

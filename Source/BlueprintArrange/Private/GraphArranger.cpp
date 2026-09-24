@@ -6,7 +6,9 @@
 #include "EdGraph/EdGraphNode.h"
 #include "EdGraph/EdGraphPin.h"
 #include "EdGraphSchema_K2.h"
+#include "EdGraphNode_Comment.h"
 #include "GraphEditor.h"
+#include "Layout/SlateRect.h"
 #include "SGraphPanel.h"
 #include "SGraphNode.h"
 #include "SGraphPin.h"
@@ -1001,4 +1003,131 @@ int32 ArrangeNodes(const TArray<UEdGraphNode*>& Nodes, const FBlueprintArrangeLa
 	NumMoved += PlaceKnots(EdgeCol.Knots, RealNodes, NodeSizes, KnotSizes, Settings);
 
 	return NumMoved;
+}
+
+// ==========================================================================
+//  Comment boxes
+// ==========================================================================
+
+namespace
+{
+	FIntPoint CommentSize(const UEdGraphNode* Comment)
+	{
+		return {Comment->NodeWidth, Comment->NodeHeight};
+	}
+}
+
+TArray<FCommentFrame> CaptureCommentFrames(const UEdGraph* Graph, const FBlueprintArrangeLayoutSettings& Settings)
+{
+	TArray<FCommentFrame> Frames;
+	if (!Graph)
+	{
+		return Frames;
+	}
+
+	TArray<UEdGraphNode*> Candidates;
+	TArray<UEdGraphNode_Comment*> Comments;
+	for (UEdGraphNode* Node : Graph->Nodes)
+	{
+		if (!Node)
+		{
+			continue;
+		}
+		Candidates.Add(Node);
+		if (UEdGraphNode_Comment* Comment = Cast<UEdGraphNode_Comment>(Node))
+		{
+			Comments.Add(Comment);
+		}
+	}
+	if (Comments.IsEmpty())
+	{
+		return Frames;
+	}
+
+	// Comments store their own size; everything else uses the widget size.
+	const TArray<FNodeSize> NodeSizes = BuildNodeSizes(Candidates, FindGraphPanel(Graph), Settings);
+	TArray<FIntPoint> Sizes;
+	Sizes.SetNum(Candidates.Num());
+	for (int32 i = 0; i < Candidates.Num(); ++i)
+	{
+		Sizes[i] = Candidates[i]->IsA<UEdGraphNode_Comment>()
+			? CommentSize(Candidates[i])
+			: FIntPoint(NodeSizes[i].Width, NodeSizes[i].Height);
+	}
+
+	for (UEdGraphNode_Comment* Comment : Comments)
+	{
+		const FSlateRect CommentRect(
+			Comment->NodePosX, Comment->NodePosY,
+			Comment->NodePosX + Comment->NodeWidth, Comment->NodePosY + Comment->NodeHeight);
+
+		FCommentFrame Frame;
+		Frame.Comment = Comment;
+		for (int32 i = 0; i < Candidates.Num(); ++i)
+		{
+			UEdGraphNode* Node = Candidates[i];
+			if (Node == Comment)
+			{
+				continue;
+			}
+			// Same rule the editor uses to decide what moves with a comment.
+			const FSlateRect NodeRect(
+				Node->NodePosX, Node->NodePosY,
+				Node->NodePosX + Sizes[i].X, Node->NodePosY + Sizes[i].Y);
+			if (FSlateRect::IsRectangleContained(CommentRect, NodeRect))
+			{
+				Frame.Contents.Add(Node);
+				Frame.OriginalPositions.Emplace(Node->NodePosX, Node->NodePosY);
+				Frame.Sizes.Add(Sizes[i]);
+			}
+		}
+		if (!Frame.Contents.IsEmpty())
+		{
+			Frames.Add(MoveTemp(Frame));
+		}
+	}
+
+	// Smallest first: nested comments are refitted before their parents.
+	Frames.StableSort([](const FCommentFrame& A, const FCommentFrame& B)
+	{
+		return static_cast<int64>(A.Comment->NodeWidth) * A.Comment->NodeHeight
+			< static_cast<int64>(B.Comment->NodeWidth) * B.Comment->NodeHeight;
+	});
+
+	return Frames;
+}
+
+int32 RefitCommentFrames(const TArray<FCommentFrame>& Frames, const FBlueprintArrangeLayoutSettings& Settings)
+{
+	int32 NumChanged = 0;
+	for (const FCommentFrame& Frame : Frames)
+	{
+		bool bAnyMoved = false;
+		for (int32 i = 0; i < Frame.Contents.Num() && !bAnyMoved; ++i)
+		{
+			const UEdGraphNode* Node = Frame.Contents[i];
+			bAnyMoved = FIntPoint(Node->NodePosX, Node->NodePosY) != Frame.OriginalPositions[i]
+				|| (Node->IsA<UEdGraphNode_Comment>() && CommentSize(Node) != Frame.Sizes[i]);
+		}
+		if (!bAnyMoved)
+		{
+			continue;
+		}
+
+		FIntPoint Min(MAX_int32, MAX_int32);
+		FIntPoint Max(MIN_int32, MIN_int32);
+		for (int32 i = 0; i < Frame.Contents.Num(); ++i)
+		{
+			const UEdGraphNode* Node = Frame.Contents[i];
+			const FIntPoint Size = Node->IsA<UEdGraphNode_Comment>() ? CommentSize(Node) : Frame.Sizes[i];
+			Min = Min.ComponentMin({Node->NodePosX, Node->NodePosY});
+			Max = Max.ComponentMax({Node->NodePosX + Size.X, Node->NodePosY + Size.Y});
+		}
+
+		const float Padding = static_cast<float>(Settings.CommentPadding);
+		Frame.Comment->Modify();
+		Frame.Comment->SetBounds(FSlateRect(Min.X - Padding, Min.Y - Padding, Max.X + Padding, Max.Y + Padding));
+		++NumChanged;
+	}
+	return NumChanged;
 }

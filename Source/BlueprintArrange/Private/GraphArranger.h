@@ -22,7 +22,37 @@ struct FBlueprintArrangeLayoutSettings
 	int32 FallbackMaxHeight = 512;   // clamp so huge nodes don't dominate
 	int32 FallbackDefaultWidth = 200;
 	int32 FallbackKnotSize = 16;     // reroute (knot) nodes
+
+	int32 CommentPadding = 50;       // margin around a refitted comment's contents (same as "Create Comment")
 };
+
+class UEdGraphNode_Comment;
+
+/** A comment box and what it framed before arranging. */
+struct FCommentFrame
+{
+	UEdGraphNode_Comment* Comment = nullptr;
+	/** Nodes and nested comments that were fully inside the box. */
+	TArray<UEdGraphNode*> Contents;
+	/** Contents' positions at capture time, to detect whether anything moved. */
+	TArray<FIntPoint> OriginalPositions;
+	/** Contents' sizes at capture time (nested comments are re-read when refitting). */
+	TArray<FIntPoint> Sizes;
+};
+
+/**
+ * Record which nodes each comment in the graph frames. Call before ArrangeNodes.
+ * Frames are sorted smallest first, so nested comments are refitted before
+ * the comments around them.
+ */
+TArray<FCommentFrame> CaptureCommentFrames(const UEdGraph* Graph, const FBlueprintArrangeLayoutSettings& Settings = {});
+
+/**
+ * Resize each comment whose contents moved so it frames them again. Calls
+ * Modify() on the comments it changes, so run it inside the transaction.
+ * @return Number of comments changed.
+ */
+int32 RefitCommentFrames(const TArray<FCommentFrame>& Frames, const FBlueprintArrangeLayoutSettings& Settings = {});
 
 /**
  * Sugiyama-style layered auto-layout for the given nodes.
