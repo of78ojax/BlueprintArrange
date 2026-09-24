@@ -1,10 +1,8 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright (c) Blueprint Arrange contributors. Licensed under the MIT License.
 
 #include "BlueprintArrangeModule.h"
 
 
-#include "ToolMenus.h"
-#include "BlueprintEditor.h"
 #include "GraphEditorModule.h"
 #include "GraphEditor.h"
 #include "EdGraph/EdGraph.h"

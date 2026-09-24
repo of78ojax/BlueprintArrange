@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright (c) Blueprint Arrange contributors. Licensed under the MIT License.
 
 #include "GraphArranger.h"
 

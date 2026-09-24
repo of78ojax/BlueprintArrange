@@ -1,4 +1,4 @@
-// Copyright Epic Games, Inc. All Rights Reserved.
+// Copyright (c) Blueprint Arrange contributors. Licensed under the MIT License.
 
 #pragma once
 
@@ -9,7 +9,6 @@ class FUICommandList;
 class UEdGraph;
 class UEdGraphNode;
 class UEdGraphPin;
-class UToolMenu;
 class FExtender;
 
 class FBlueprintArrangeModule : public IModuleInterface
@@ -27,6 +26,5 @@ private:
 		bool bIsReadOnly
 	);
 
-	TSharedPtr<FUICommandList> PluginCommands;
 
 };
