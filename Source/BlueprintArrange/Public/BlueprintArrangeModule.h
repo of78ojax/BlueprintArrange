@@ -26,7 +26,7 @@ private:
 		const UEdGraph* Graph,
 		const UEdGraphNode* Node,
 		const UEdGraphPin* Pin,
-		bool bIsPin
+		bool bIsReadOnly
 	);
 
 	TSharedPtr<FUICommandList> PluginCommands;

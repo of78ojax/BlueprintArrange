@@ -12,9 +12,20 @@
 #include "SNodePanel.h"
 #include "GraphArranger.h"
 #include "ScopedTransaction.h"
+#include "EdGraphSchema_K2.h"
+#include "MaterialGraph/MaterialGraphSchema.h"
 
 #define LOCTEXT_NAMESPACE "BlueprintArrange"
 
+namespace
+{
+	// Only graphs that flow left to right and store positions in NodePosX/Y.
+	bool IsSupportedGraph(const UEdGraph* Graph)
+	{
+		const UEdGraphSchema* Schema = Graph ? Graph->GetSchema() : nullptr;
+		return Schema && (Schema->IsA<UEdGraphSchema_K2>() || Schema->IsA<UMaterialGraphSchema>());
+	}
+}
 
 IMPLEMENT_MODULE(FBlueprintArrangeModule, BlueprintArrange)
 
@@ -52,30 +63,38 @@ TSharedRef<FExtender> FBlueprintArrangeModule::OnExtendGraphMenu(
 	const UEdGraph* Graph,
 	const UEdGraphNode* Node,
 	const UEdGraphPin* Pin,
-	bool bIsPin)
+	bool bIsReadOnly)
 {
 	TSharedRef<FExtender> Extender = MakeShared<FExtender>();
 
-	if (!Node)
+	if (!Node || bIsReadOnly || !IsSupportedGraph(Graph))
 	{
 		return Extender;
 	}
 
+	const TWeakObjectPtr<const UEdGraph> WeakGraph(Graph);
+	const TWeakObjectPtr<const UEdGraphNode> WeakNode(Node);
+
+	// "EdGraphSchemaOrganization" is shared by the Blueprint and Material
+	// schemas (unlike "EdGraphSchemaNodeActions", which is K2 only).
 	Extender->AddMenuExtension(
-		"EdGraphSchemaNodeActions",
+		"EdGraphSchemaOrganization",
 		EExtensionHook::After,
 		CommandList,
 		FMenuExtensionDelegate::CreateLambda(
-			[this, Graph, Node](FMenuBuilder& MenuBuilder)
+			[this, WeakGraph, WeakNode](FMenuBuilder& MenuBuilder)
 			{
 				MenuBuilder.AddMenuEntry(
 					FText::FromString("Arrange"),
 					FText::FromString("Arrange Blueprint nodes"),
 					FSlateIcon(),
 					FUIAction(
-						FExecuteAction::CreateLambda([this, Graph, Node]()
+						FExecuteAction::CreateLambda([this, WeakGraph, WeakNode]()
 						{
-							ArrangeCurrentGraph(Graph,Node);
+							if (WeakGraph.IsValid())
+							{
+								ArrangeCurrentGraph(WeakGraph.Get(), WeakNode.Get());
+							}
 						})
 					)
 				);
