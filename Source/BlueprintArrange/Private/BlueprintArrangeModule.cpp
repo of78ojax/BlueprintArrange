@@ -25,6 +25,80 @@ namespace
 		const UEdGraphSchema* Schema = Graph ? Graph->GetSchema() : nullptr;
 		return Schema && (Schema->IsA<UEdGraphSchema_K2>() || Schema->IsA<UMaterialGraphSchema>());
 	}
+
+	// Nodes the arranger is allowed to move.
+	bool IsArrangeable(const UEdGraphNode* Node)
+	{
+		return Node != nullptr;
+	}
+
+	// The selection of the graph editor currently showing this graph, deduplicated.
+	TArray<UEdGraphNode*> GatherSelectedNodes(const UEdGraph* Graph)
+	{
+		TSet<UEdGraphNode*> Unique;
+		TArray<UEdGraphNode*> Result;
+		if (TSharedPtr<SGraphEditor> GraphEditor = SGraphEditor::FindGraphEditorForGraph(Graph))
+		{
+			for (UObject* SelectedObject : GraphEditor->GetSelectedNodes())
+			{
+				UEdGraphNode* Node = Cast<UEdGraphNode>(SelectedObject);
+				bool bAlreadyInSet = false;
+				if (IsArrangeable(Node) && Node->GetGraph() == Graph)
+				{
+					Unique.Add(Node, &bAlreadyInSet);
+					if (!bAlreadyInSet)
+					{
+						Result.Add(Node);
+					}
+				}
+			}
+		}
+		return Result;
+	}
+
+	// Every movable node in the graph, deduplicated.
+	TArray<UEdGraphNode*> GatherAllNodes(const UEdGraph* Graph)
+	{
+		TSet<UEdGraphNode*> Unique;
+		TArray<UEdGraphNode*> Result;
+		for (UEdGraphNode* Node : Graph->Nodes)
+		{
+			bool bAlreadyInSet = false;
+			if (IsArrangeable(Node))
+			{
+				Unique.Add(Node, &bAlreadyInSet);
+				if (!bAlreadyInSet)
+				{
+					Result.Add(Node);
+				}
+			}
+		}
+		return Result;
+	}
+
+	void RunArrange(UEdGraph* Graph, const TArray<UEdGraphNode*>& Nodes)
+	{
+		if (!Graph || Nodes.Num() < 2)
+		{
+			return;
+		}
+
+		// Modify() only records undo state while a transaction is open.
+		FScopedTransaction Transaction(LOCTEXT("ArrangeNodes", "Arrange Nodes"));
+
+		for (UEdGraphNode* Node : Nodes)
+		{
+			Node->Modify();
+		}
+
+		if (ArrangeNodes(Nodes) == 0)
+		{
+			Transaction.Cancel();
+			return;
+		}
+
+		Graph->NotifyGraphChanged();
+	}
 }
 
 IMPLEMENT_MODULE(FBlueprintArrangeModule, BlueprintArrange)
@@ -72,8 +146,7 @@ TSharedRef<FExtender> FBlueprintArrangeModule::OnExtendGraphMenu(
 		return Extender;
 	}
 
-	const TWeakObjectPtr<const UEdGraph> WeakGraph(Graph);
-	const TWeakObjectPtr<const UEdGraphNode> WeakNode(Node);
+	const TWeakObjectPtr<UEdGraph> WeakGraph(const_cast<UEdGraph*>(Graph));
 
 	// "EdGraphSchemaOrganization" is shared by the Blueprint and Material
 	// schemas (unlike "EdGraphSchemaNodeActions", which is K2 only).
@@ -82,18 +155,40 @@ TSharedRef<FExtender> FBlueprintArrangeModule::OnExtendGraphMenu(
 		EExtensionHook::After,
 		CommandList,
 		FMenuExtensionDelegate::CreateLambda(
-			[this, WeakGraph, WeakNode](FMenuBuilder& MenuBuilder)
+			[WeakGraph](FMenuBuilder& MenuBuilder)
 			{
+				// Right-clicking always leaves the clicked node selected, so the
+				// selection can't be used to decide between "selection" and
+				// "whole graph". Offer both explicitly.
 				MenuBuilder.AddMenuEntry(
-					FText::FromString("Arrange"),
-					FText::FromString("Arrange Blueprint nodes"),
+					LOCTEXT("ArrangeSelection", "Arrange Selection"),
+					LOCTEXT("ArrangeSelectionTooltip", "Auto-layout the selected nodes"),
 					FSlateIcon(),
 					FUIAction(
-						FExecuteAction::CreateLambda([this, WeakGraph, WeakNode]()
+						FExecuteAction::CreateLambda([WeakGraph]()
 						{
-							if (WeakGraph.IsValid())
+							if (UEdGraph* G = WeakGraph.Get())
 							{
-								ArrangeCurrentGraph(WeakGraph.Get(), WeakNode.Get());
+								RunArrange(G, GatherSelectedNodes(G));
+							}
+						}),
+						FCanExecuteAction::CreateLambda([WeakGraph]()
+						{
+							const UEdGraph* G = WeakGraph.Get();
+							return G && GatherSelectedNodes(G).Num() >= 2;
+						})
+					)
+				);
+				MenuBuilder.AddMenuEntry(
+					LOCTEXT("ArrangeGraph", "Arrange Graph"),
+					LOCTEXT("ArrangeGraphTooltip", "Auto-layout every node in this graph"),
+					FSlateIcon(),
+					FUIAction(
+						FExecuteAction::CreateLambda([WeakGraph]()
+						{
+							if (UEdGraph* G = WeakGraph.Get())
+							{
+								RunArrange(G, GatherAllNodes(G));
 							}
 						})
 					)
@@ -103,66 +198,6 @@ TSharedRef<FExtender> FBlueprintArrangeModule::OnExtendGraphMenu(
 	);
 
 	return Extender;
-}
-
-void FBlueprintArrangeModule::ArrangeCurrentGraph(const UEdGraph* Graph, const UEdGraphNode* Node)
-{
-	// debug log for testing
-	UE_LOG(LogTemp, Warning, TEXT("ArrangeCurrentGraph called"));
-
-	if (!GEditor)
-	{
-		return;
-	}
-
-	// Get the SGraphEditor widget that is currently viewing this graph,
-	// then read its selection set. If none is open / nothing selected,
-	// fall back to arranging all nodes in the graph.
-	TArray<UEdGraphNode*> SelectedNodes;
-
-	if (TSharedPtr<SGraphEditor> GraphEditor = SGraphEditor::FindGraphEditorForGraph(Graph))
-	{
-		const FGraphPanelSelectionSet& Selection = GraphEditor->GetSelectedNodes();
-		SelectedNodes.Reserve(Selection.Num());
-		for (UObject* SelectedObject : Selection)
-		{
-			if (UEdGraphNode* SelectedNode = Cast<UEdGraphNode>(SelectedObject))
-			{
-				SelectedNodes.Add(SelectedNode);
-			}
-		}
-	}
-
-	// Fall back to every node in the graph when there is no selection.
-	if (SelectedNodes.IsEmpty())
-	{
-		for (UEdGraphNode* curNode : Graph->Nodes)
-		{
-			if (curNode)
-			{
-				SelectedNodes.Add(curNode);
-			}
-		}
-	}
-
-	// Modify() only records undo state while a transaction is open.
-	FScopedTransaction Transaction(LOCTEXT("ArrangeNodes", "Arrange Nodes"));
-
-	for (UEdGraphNode* curNode : SelectedNodes)
-	{
-		if (curNode)
-		{
-			curNode->Modify();
-		}
-	}
-
-	if (ArrangeNodes(SelectedNodes) == 0)
-	{
-		Transaction.Cancel();
-		return;
-	}
-
-	const_cast<UEdGraph*>(Graph)->NotifyGraphChanged();
 }
 
 #undef LOCTEXT_NAMESPACE

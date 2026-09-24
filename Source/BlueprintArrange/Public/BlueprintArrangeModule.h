@@ -19,8 +19,6 @@ public:
 	virtual void ShutdownModule() override;
 
 private:
-    void ArrangeCurrentGraph(const UEdGraph* Graph, const UEdGraphNode* Node);
-
 	TSharedRef<FExtender> OnExtendGraphMenu(
 		TSharedRef<FUICommandList> CommandList,
 		const UEdGraph* Graph,
