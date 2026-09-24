@@ -15,6 +15,7 @@
 #include "EdGraphSchema_K2.h"
 #include "MaterialGraph/MaterialGraphSchema.h"
 #include "MaterialGraph/MaterialGraph.h"
+#include "EdGraphNode_Comment.h"
 
 #define LOCTEXT_NAMESPACE "BlueprintArrange"
 
@@ -27,10 +28,11 @@ namespace
 		return Schema && (Schema->IsA<UEdGraphSchema_K2>() || Schema->IsA<UMaterialGraphSchema>());
 	}
 
-	// Nodes the arranger is allowed to move.
+	// Nodes the arranger is allowed to move. Comment boxes (including material
+	// comments, which derive from UEdGraphNode_Comment) stay where they are.
 	bool IsArrangeable(const UEdGraphNode* Node)
 	{
-		return Node != nullptr;
+		return Node && !Node->IsA<UEdGraphNode_Comment>();
 	}
 
 	// The selection of the graph editor currently showing this graph, deduplicated.
