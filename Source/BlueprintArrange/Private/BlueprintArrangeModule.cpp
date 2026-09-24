@@ -14,6 +14,7 @@
 #include "ScopedTransaction.h"
 #include "EdGraphSchema_K2.h"
 #include "MaterialGraph/MaterialGraphSchema.h"
+#include "MaterialGraph/MaterialGraph.h"
 
 #define LOCTEXT_NAMESPACE "BlueprintArrange"
 
@@ -95,6 +96,14 @@ namespace
 		{
 			Transaction.Cancel();
 			return;
+		}
+
+		// Materials keep their own copy of node positions on the expressions
+		// (and Material->EditorX/Y for the root). Must run inside the
+		// transaction because it calls Modify() on what it touches.
+		if (UMaterialGraph* MaterialGraph = Cast<UMaterialGraph>(Graph))
+		{
+			MaterialGraph->LinkMaterialExpressionsFromGraph();
 		}
 
 		Graph->NotifyGraphChanged();
