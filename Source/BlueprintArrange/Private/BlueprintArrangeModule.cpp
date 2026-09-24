@@ -11,6 +11,9 @@
 #include "EdGraph/EdGraphNode.h"
 #include "SNodePanel.h"
 #include "GraphArranger.h"
+#include "ScopedTransaction.h"
+
+#define LOCTEXT_NAMESPACE "BlueprintArrange"
 
 
 IMPLEMENT_MODULE(FBlueprintArrangeModule, BlueprintArrange)
@@ -123,6 +126,9 @@ void FBlueprintArrangeModule::ArrangeCurrentGraph(const UEdGraph* Graph, const U
 		}
 	}
 
+	// Modify() only records undo state while a transaction is open.
+	FScopedTransaction Transaction(LOCTEXT("ArrangeNodes", "Arrange Nodes"));
+
 	for (UEdGraphNode* curNode : SelectedNodes)
 	{
 		if (curNode)
@@ -131,7 +137,13 @@ void FBlueprintArrangeModule::ArrangeCurrentGraph(const UEdGraph* Graph, const U
 		}
 	}
 
-	ArrangeNodes(SelectedNodes);
+	if (ArrangeNodes(SelectedNodes) == 0)
+	{
+		Transaction.Cancel();
+		return;
+	}
 
 	const_cast<UEdGraph*>(Graph)->NotifyGraphChanged();
 }
+
+#undef LOCTEXT_NAMESPACE
