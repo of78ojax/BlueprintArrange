@@ -872,16 +872,111 @@ namespace
 		TArray<int32> NewY;
 	};
 
+// Weakly-connected components over the layout edges (feedback edges
+// included: they connect the same chain even though they're not laid out).
+// Used to cluster ranks so unrelated chains never interleave inside a column.
+// Component key: the smallest member index.
+TArray<int32> ComputeComponents(const TArray<FArrangeEdge>& Edges, int32 NumNodes)
+{
+	TArray<int32> Parent;
+	Parent.SetNum(NumNodes);
+	for (int32 i = 0; i < NumNodes; ++i)
+	{
+		Parent[i] = i;
+	}
+	auto Find = [&Parent](int32 a)
+	{
+		while (Parent[a] != a)
+		{
+			Parent[a] = Parent[Parent[a]];
+			a = Parent[a];
+		}
+		return a;
+	};
+	for (const FArrangeEdge& E : Edges)
+	{
+		const int32 Ra = Find(E.From);
+		const int32 Rb = Find(E.To);
+		if (Ra != Rb)
+		{
+			Parent[Ra] = Rb;
+		}
+	}
+	TArray<int32> Component;
+	Component.SetNum(NumNodes);
+	for (int32 i = 0; i < NumNodes; ++i)
+	{
+		Component[i] = Find(i);
+	}
+	return Component;
+}
+
+// Regroup each rank so that nodes of one weakly-connected component stay in
+// one contiguous band, bands ordered by their topmost member's original Y.
+// Barycenter reordering is meaningless between disconnected chains (a node's
+// neighbours never span components), so it can shuffle unrelated chains into
+// each other; once interleaved, the column packer then inserts full chain
+// heights between them, which is what scattered stray-node clusters in the
+// BigGraph fixture. Within a band the crossing-reduced order is preserved.
+void ClusterRanksByComponent(
+	TArray<TArray<int32>>& Ranks,
+	const TArray<int32>& Component,
+	const TArray<UEdGraphNode*>& Nodes,
+	int32 NumNodes,
+	const TSet<int32>& EmptyNodeIndices)
+{
+	// Band order: by the minimum original Y of each component's members.
+	TArray<int32> MinOrigY;
+	MinOrigY.Init(MAX_int32, NumNodes);
+	for (int32 n = 0; n < NumNodes; ++n)
+	{
+		const int32 c = Component[n];
+		MinOrigY[c] = FMath::Min(MinOrigY[c], Nodes[n]->NodePosY);
+	}
+
+	for (TArray<int32>& Rank : Ranks)
+	{
+		// Stable multi-key bucketing: empty band last (BuildRanksFromRanking
+		// and ReduceCrossings already keep it there), then component band
+		// order, then the existing within-rank order.
+		Rank.StableSort([&](int32 A, int32 B)
+		{
+			const bool bAEmpty = EmptyNodeIndices.Contains(A);
+			const bool bBEmpty = EmptyNodeIndices.Contains(B);
+			if (bAEmpty != bBEmpty)
+			{
+				return !bAEmpty;
+			}
+			const int32 Ca = Component[A];
+			const int32 Cb = Component[B];
+			if (Ca != Cb)
+			{
+				return MinOrigY[Ca] < MinOrigY[Cb];
+			}
+			return false; // stable: keep the crossing-reduced order
+		});
+	}
+}
+
 	// Barycenter coordinate assignment. Alternates down (rank 0 -> MaxRank,
 	// pulling each column toward its upstream neighbours) and up (MaxRank -> 0,
 	// pulling toward downstream neighbours) sweeps. On every sweep a column's
 	// nodes first get a desired Y that lines their pin up with the neighbour's
-	// pin (weighted average over all links), then the column is packed
-	// top-to-bottom preserving the crossing-reduction order while following
-	// that desired Y (never overlapping). Each column is as wide as its widest
-	// node and nodes are right-aligned within it. Two data-only nodes stacked
-	// directly on top of each other use the smaller DataRowSpacing. Empty
-	// nodes are excluded from the relaxation.
+	// pin, then the column is packed top-to-bottom preserving the
+	// crossing-reduction order while following that desired Y (never
+	// overlapping). Each column is as wide as its widest node and nodes are
+	// right-aligned within it. Two data-only nodes stacked directly on top of
+	// each other use the smaller DataRowSpacing. Empty nodes are excluded from
+	// the relaxation.
+	//
+	// The desired Y is the TOPMOST aligned position over the neighbours (exec
+	// wires preferred): the weighted mean previously used here sits below every
+	// achievable alignment for a fan-out whose consumers must stack (each
+	// consumer alone forces a gap the size of its node height), so every sweep
+	// pushed source and consumers further apart - a linear divergence that
+	// stranded nodes thousands of units below the graph (the BigGraph blow-up).
+	// Aligning with the topmost wire converges: the source sits so its first
+	// exec wire is straight and later sweeps have nothing left to pull.
 	FCoordinates AssignCoordinates(
 		const TArray<TArray<int32>>& Ranks,
 		int32 MaxRank,
@@ -931,7 +1026,10 @@ namespace
 			{
 				const int32 r = bDownward ? ri : MaxRank - ri;
 
-				// Desired Y per node from the already-placed opposite column(s).
+				// Desired Y per node from the already-placed opposite column(s):
+				// the topmost aligned position, exec wires preferred over data
+				// wires (a straight exec wire matters more visually). See the
+				// comment above for why not a mean.
 				for (const int32 n : Ranks[r])
 				{
 					const TArray<FNeighborLink>& Neighbors = bDownward ? Adj.Upstream[n] : Adj.Downstream[n];
@@ -940,16 +1038,19 @@ namespace
 						DesiredY[n] = static_cast<float>(Coords.NewY[n]);
 						continue;
 					}
-					float WeightSum = 0.f;
-					float WeightedY = 0.f;
+					float BestExec = MAX_flt;
+					float BestAny = MAX_flt;
 					for (const FNeighborLink& Link : Neighbors)
 					{
 						// A straight wire needs both pin centres at the same Y.
-						const float W = PinWeight(Link.bExec);
-						WeightedY += W * (Coords.NewY[Link.NeighborNode] + Link.NeighborPinY - Link.SelfPinY);
-						WeightSum += W;
+						const float AlignedY = Coords.NewY[Link.NeighborNode] + Link.NeighborPinY - Link.SelfPinY;
+						BestAny = FMath::Min(BestAny, AlignedY);
+						if (Link.bExec)
+						{
+							BestExec = FMath::Min(BestExec, AlignedY);
+						}
 					}
-					DesiredY[n] = WeightedY / WeightSum;
+					DesiredY[n] = (BestExec < MAX_flt) ? BestExec : BestAny;
 				}
 
 				// Pack this column preserving order while following the desired Y.
@@ -1213,6 +1314,13 @@ int32 ArrangeNodes(const TArray<UEdGraphNode*>& Nodes, const FBlueprintArrangeLa
 	TArray<TArray<int32>> Ranks = BuildRanksFromRanking(
 		Ranking.Rank, Ranking.MaxRank, NumLayout, EmptyNodeIndices, LayoutNodes);
 	ReduceCrossings(Ranks, Ranking.MaxRank, NumLayout, EmptyNodeIndices, Adj);
+
+	// 7b. Keep unrelated chains in separate bands within each rank. Barycenter
+	// has no meaning across weakly-connected components, so it can interleave
+	// them; the column packer then wedges whole chain heights in between,
+	// which is the "stray nodes" blow-up on multi-event graphs.
+	const TArray<int32> Component = ComputeComponents(Blocks.Edges, NumLayout);
+	ClusterRanksByComponent(Ranks, Component, LayoutNodes, NumLayout, EmptyNodeIndices);
 
 	// 8. Coordinate assignment: pin-aligned Y + per-column right-aligned X.
 	FCoordinates Coords = AssignCoordinates(

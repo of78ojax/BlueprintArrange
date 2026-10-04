@@ -11,7 +11,7 @@
 	"MarketplaceURL": "",
 	"SupportURL": "https://github.com/of78ojax/BlueprintArrange/issues",
 	"EngineVersion": "5.8.0",
-	"CanContainContent": false,
+	"CanContainContent": true,
 	"IsBetaVersion": false,
 	"IsExperimentalVersion": false,
 	"Installed": false,

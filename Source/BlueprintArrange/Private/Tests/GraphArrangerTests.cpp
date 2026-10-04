@@ -426,4 +426,84 @@ bool FBlueprintArrangeCommentTest::RunTest(const FString& Parameters)
 	return true;
 }
 
+// A fan-out node (Switch/ForLoop with several stacked consumers) whose
+// desired Y is the weighted MEAN over its consumers diverges: the mean sits
+// below every achievable alignment, so each sweep pushes the source and the
+// re-packed consumers further apart (linear growth). The aggregation must
+// align with the topmost wire instead, keeping the fan compact.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBlueprintArrangeFanOutCompactTest, "BlueprintArrange.FanOutStaysCompact",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FBlueprintArrangeFanOutCompactTest::RunTest(const FString& Parameters)
+{
+	FTestGraph G;
+
+	// Chain A: Switch (3 exec outs, 1 data in) -> three Prints (7 inputs, tall).
+	UEdGraphNode* Switch = G.AddNode(2000, 5760, 1, 3, 1, 0);
+	UEdGraphNode* PrintA1 = G.AddNode(2200, 6160, 1, 1, 6, 0);
+	UEdGraphNode* PrintA2 = G.AddNode(2400, 5296, 1, 1, 6, 0);
+	UEdGraphNode* PrintA3 = G.AddNode(2600, 5936, 1, 1, 6, 0);
+	FTestGraph::Link(Switch, 0, PrintA1, 0);
+	FTestGraph::Link(Switch, 1, PrintA2, 0);
+	FTestGraph::Link(Switch, 2, PrintA3, 0);
+
+	// Chain B: ForLoop (2 exec outs, 2 data in) -> Print.
+	UEdGraphNode* ForLoop = G.AddNode(2800, 3744, 1, 2, 2, 1);
+	UEdGraphNode* PrintB = G.AddNode(3000, 3744, 1, 1, 6, 0);
+	FTestGraph::Link(ForLoop, 0, PrintB, 0);
+
+	ArrangeNodes(G.Nodes, Settings);
+
+	TestFalse(TEXT("Nodes overlap"), G.AnyOverlap());
+
+	int32 MinY = MAX_int32, MaxY = MIN_int32;
+	for (const UEdGraphNode* Node : G.Nodes)
+	{
+		MinY = FMath::Min(MinY, Node->NodePosY);
+		MaxY = FMath::Max(MaxY, Node->NodePosY);
+	}
+	const int32 Span = MaxY - MinY;
+	// Divergent mean-aggregation ratchets this to ~1800; compact stays <= 1200.
+	TestTrue(FString::Printf(TEXT("Fan-out span %d stays compact (<= 1200)"), Span), Span <= 1200);
+	return true;
+}
+
+// Two independent chains whose nodes interleave by original Y. Barycenter
+// reordering across disconnected components amplifies the fan-out divergence
+// (~1800 pre-fix); component-clustered ranks keep the same graph compact.
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FBlueprintArrangeInterleavedComponentsTest, "BlueprintArrange.InterleavedComponentsStayCompact",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FBlueprintArrangeInterleavedComponentsTest::RunTest(const FString& Parameters)
+{
+	FTestGraph G;
+
+	// Component A: Switch fan (three tall Prints).
+	UEdGraphNode* Switch = G.AddNode(2000, 0, 1, 3, 1, 0);
+	UEdGraphNode* PrintA1 = G.AddNode(2200, 100, 1, 1, 6, 0);
+	UEdGraphNode* PrintA2 = G.AddNode(2400, -100, 1, 1, 6, 0);
+	UEdGraphNode* PrintA3 = G.AddNode(2600, 300, 1, 1, 6, 0);
+	FTestGraph::Link(Switch, 0, PrintA1, 0);
+	FTestGraph::Link(Switch, 1, PrintA2, 0);
+	FTestGraph::Link(Switch, 2, PrintA3, 0);
+
+	// Component B: ForLoop -> Print, originally interleaved between A's prints.
+	UEdGraphNode* ForLoop = G.AddNode(2800, -150, 1, 2, 2, 1);
+	UEdGraphNode* PrintB = G.AddNode(3000, -100, 1, 1, 6, 0);
+	FTestGraph::Link(ForLoop, 0, PrintB, 0);
+
+	ArrangeNodes(G.Nodes, Settings);
+
+	TestFalse(TEXT("Nodes overlap"), G.AnyOverlap());
+
+	int32 MinY = MAX_int32, MaxY = MIN_int32;
+	for (const UEdGraphNode* Node : G.Nodes)
+	{
+		MinY = FMath::Min(MinY, Node->NodePosY);
+		MaxY = FMath::Max(MaxY, Node->NodePosY);
+	}
+	const int32 Span = MaxY - MinY;
+	// Interleaving ratchets this to ~1800; clustered components stay <= 1200.
+	TestTrue(FString::Printf(TEXT("Interleaved span %d stays compact (<= 1200)"), Span), Span <= 1200);
+	return true;
+}
+
 #endif // WITH_DEV_AUTOMATION_TESTS
