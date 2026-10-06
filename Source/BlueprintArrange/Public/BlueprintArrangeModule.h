@@ -3,13 +3,16 @@
 #pragma once
 
 #include "CoreMinimal.h"
+#include "Delegates/IDelegateInstance.h"
 #include "Modules/ModuleManager.h"
+#include "Templates/SharedPointer.h"
 
 class FUICommandList;
 class UEdGraph;
 class UEdGraphNode;
 class UEdGraphPin;
 class FExtender;
+struct FWirePanelPinFactory;
 
 class FBlueprintArrangeModule : public IModuleInterface
 {
@@ -25,6 +28,9 @@ private:
 		const UEdGraphPin* Pin,
 		bool bIsReadOnly
 	);
+
+	TSharedPtr<FWirePanelPinFactory> WirePanelPinFactory;
+	FDelegateHandle AssetEditorOpenedHandle;
 
 
 };

@@ -14,6 +14,9 @@
 #include "MaterialGraph/MaterialGraphSchema.h"
 #include "MaterialGraph/MaterialGraph.h"
 #include "EdGraphNode_Comment.h"
+#include "EdGraphUtilities.h"
+#include "Subsystems/AssetEditorSubsystem.h"
+#include "WireGraphIntegration.h"
 
 #define LOCTEXT_NAMESPACE "BlueprintArrange"
 
@@ -130,10 +133,39 @@ void FBlueprintArrangeModule::StartupModule()
 			&FBlueprintArrangeModule::OnExtendGraphMenu
 		)
 	);
+
+	// Wire drawing styles: register the visual pin factory whose CreatePin
+	// hook installs a per-panel node factory on supported graphs. The panel
+	// consults its node factory exclusively for connection policies, which
+	// outranks every registered connection factory (MaterialEditor's
+	// included) without touching private registry state.
+	WirePanelPinFactory = MakeShared<FWirePanelPinFactory>();
+	FEdGraphUtilities::RegisterVisualPinFactory(WirePanelPinFactory);
+
+	// Material editors never consult the pin factory above (MaterialEditor's
+	// own factory claims material pins first), so install the panel factory
+	// when the material editor has finished opening instead.
+	AssetEditorOpenedHandle = GEditor->GetEditorSubsystem<UAssetEditorSubsystem>()->OnAssetEditorOpened().AddLambda(
+		[](UObject* Asset)
+		{
+			WireGraphIntegration::OnAssetEditorOpened(Asset);
+		}
+	);
 }
 
 void FBlueprintArrangeModule::ShutdownModule()
 {
+	if (UAssetEditorSubsystem* AssetEditorSubsystem = GEditor ? GEditor->GetEditorSubsystem<UAssetEditorSubsystem>() : nullptr)
+	{
+		AssetEditorSubsystem->OnAssetEditorOpened().Remove(AssetEditorOpenedHandle);
+	}
+
+	if (WirePanelPinFactory.IsValid())
+	{
+		FEdGraphUtilities::UnregisterVisualPinFactory(WirePanelPinFactory);
+		WirePanelPinFactory.Reset();
+	}
+
 	FGraphEditorModule& GraphEditorModule =
 		FModuleManager::LoadModuleChecked<FGraphEditorModule>(
 			"GraphEditor"

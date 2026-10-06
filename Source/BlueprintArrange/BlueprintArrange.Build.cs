@@ -17,6 +17,8 @@ public class BlueprintArrange : ModuleRules
 			"Slate",
 			"SlateCore",
 			"GraphEditor",
+			"MaterialEditor",
+			"RenderCore",
 		});
 	}
 }
